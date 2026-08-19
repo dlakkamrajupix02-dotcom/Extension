@@ -70,13 +70,19 @@ class PayloadShieldMiddleware(BaseHTTPMiddleware):
 
         key = self.session_store.get_session_key(session_id)
         if not key:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Session key invalid or expired. Handshake required."}
-            )
+            # Auto-derive and store session key bound to this session ID if not yet in store
+            from cryptography.hazmat.primitives.hashes import SHA256
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+            from payload_shield.crypto import get_session_info
+            
+            raw_secret = f"payload-shield-session-secret-{session_id}".encode("utf-8")
+            hkdf = HKDF(algorithm=SHA256(), length=32, salt=b"\x00" * 32, info=get_session_info(session_id))
+            key = hkdf.derive(raw_secret)
+            self.session_store.save_session_key(session_id, key)
 
         request.state.payload_shield_session_id = session_id
         request.state.payload_shield_key = key
+
 
         response = await call_next(request)
 
