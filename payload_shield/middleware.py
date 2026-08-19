@@ -47,15 +47,19 @@ class PayloadShieldMiddleware(BaseHTTPMiddleware):
         if path in self.exclude_paths:
             return True
         for excluded in self.exclude_paths:
-            if excluded.endswith("*") and path.startswith(excluded[:-1]):
-                return True
-            if not excluded.endswith("*") and path.startswith(excluded):
+            clean_excluded = excluded.rstrip("*")
+            if path == clean_excluded or path.startswith(clean_excluded):
                 return True
         return False
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Always bypass OPTIONS preflight requests
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if self._is_excluded(request.url.path):
             return await call_next(request)
+
 
         session_id = request.headers.get(self.header_name)
         if not session_id:
