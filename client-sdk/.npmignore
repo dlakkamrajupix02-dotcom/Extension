@@ -1,0 +1,7 @@
+# Exclude source, tests, and config from npm release tarball
+src/
+tests/
+tsconfig.json
+node_modules/
+.pytest_cache/
+vitest.config.ts

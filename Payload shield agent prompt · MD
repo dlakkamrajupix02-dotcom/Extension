@@ -1,0 +1,154 @@
+# Project Brief: FastAPI + React Payload Encryption Library ("Payload Shield")
+
+## Agenda / Purpose
+
+Build an open-source library pair (Python/FastAPI backend package + React frontend SDK) that encrypts API response payloads so that raw data is not visible as plaintext JSON in the browser's Network tab. Decryption happens client-side in React, just before rendering, using a session-scoped key established at login.
+
+**This library's real, honest purpose:** raise the cost of casual/automated scraping (copy-pasting Network tab responses, basic bots hitting endpoints directly without executing JS, bulk log scraping by proxies). It is explicitly NOT a claim of "unbreakable" security. A user with browser DevTools knowledge can still find the key and decrypt manually. Document this limitation clearly and prominently — do not overclaim.
+
+Do not proceed with implying or marketing this as making data completely inaccessible to end users. Every doc, docstring, and README section should state the actual threat model.
+
+---
+
+## Threat Model (must be documented in README and respected in design decisions)
+
+**Protects against:**
+- Casual scraping via copy-pasting Network tab JSON
+- Naive bots/scripts calling the API directly without performing the JS handshake
+- Passive network-log harvesting by proxies/extensions that just dump response bodies
+- Lazy competitor data-scraping tooling
+
+**Does NOT protect against:**
+- A logged-in end user with DevTools access to their own session (they can always find the key/plaintext eventually)
+- XSS attacks (if attacker can run JS in-page, they can read the key wherever it's stored)
+- A motivated reverse engineer who reads the bundle and reimplements the client
+
+This must be layered ON TOP OF HTTPS/TLS, never as a replacement for it.
+
+---
+
+## Architecture
+
+1. **Key exchange (ECDH, X25519):** On login, client generates an ephemeral key pair, sends its public key to backend. Backend generates its own key pair, returns its public key. Both sides derive the same shared secret via ECDH — the actual symmetric key never travels over the wire.
+2. **Symmetric encryption (AES-256-GCM):** All protected route responses/requests are encrypted with the derived session key. GCM mode covers both confidentiality and integrity (tamper detection).
+3. **Session key lifecycle:** Key is valid from login until logout. Backend stores session key server-side (Redis, keyed by session/user ID) with TTL. Logout invalidates it server-side immediately, even if a copy leaked client-side.
+4. **Client-side key storage (configurable):** Support three modes — `memory` (safest, lost on refresh), `sessionStorage` (cleared on tab close), `localStorage` (persists, least safe but best UX). Default to `sessionStorage`; require explicit opt-in for `localStorage` with a console warning about XSS exposure.
+5. **FastAPI integration:** Provide both a reusable dependency (per-route opt-in) and an optional middleware (blanket opt-in with route exclusion list).
+6. **React SDK:** A context/provider that manages the handshake and key lifecycle, a fetch/axios wrapper that auto-decrypts response bodies, and a hook (e.g. `useEncryptedFetch` / `useDecryptedData`) so components never manually touch ciphertext.
+
+---
+
+## Required Folder Structure
+
+```
+payload-shield/
+├── README.md                          # Full threat model, quickstart, API reference
+├── LICENSE
+├── .gitignore
+├── pyproject.toml                     # Python package config (payload_shield)
+│
+├── payload_shield/                    # Python/FastAPI package
+│   ├── __init__.py
+│   ├── crypto.py                      # ECDH handshake + AES-256-GCM encrypt/decrypt helpers
+│   ├── session_store.py               # Redis-backed session key store, TTL, invalidation
+│   ├── dependency.py                  # FastAPI Depends()-based per-route encryption
+│   ├── middleware.py                  # Optional blanket middleware w/ exclusion list
+│   ├── models.py                      # Pydantic models: HandshakeRequest/Response, etc.
+│   ├── exceptions.py                  # Custom exceptions (HandshakeError, KeyExpiredError, etc.)
+│   └── config.py                      # Settings (key TTL, algorithm choices, Redis URL)
+│
+├── client-sdk/                        # React/TypeScript package (published separately, e.g. npm)
+│   ├── package.json
+│   , tsconfig.json
+│   ├── src/
+│   │   ├── index.ts
+│   │   ├── crypto.ts                  # WebCrypto ECDH + AES-GCM implementation
+│   │   ├── PayloadShieldProvider.tsx  # Context provider, handshake on mount, key lifecycle
+│   │   ├── useEncryptedFetch.ts       # Hook: fetch wrapper with auto-decrypt
+│   │   ├── storage.ts                 # Pluggable storage strategy (memory/session/local)
+│   │   └── types.ts
+│   └── tests/
+│
+├── examples/
+│   ├── fastapi-demo/                  # Minimal FastAPI app using the package end-to-end
+│   │   ├── main.py
+│   │   └── requirements.txt
+│   └── react-demo/                    # Minimal React app consuming the SDK
+│       ├── src/App.tsx
+│       └── package.json
+│
+├── tests/
+│   ├── test_crypto.py                 # Unit tests: ECDH derivation, AES-GCM round trip
+│   ├── test_session_store.py          # TTL expiry, invalidation on logout
+│   ├── test_dependency.py             # FastAPI route-level integration tests
+│   └── test_middleware.py
+│
+├── docs/
+│   ├── THREAT_MODEL.md                # Expanded, explicit version of the section above
+│   ├── GETTING_STARTED.md
+│   └── SECURITY.md                    # Responsible disclosure policy
+│
+└── .github/
+    └── workflows/
+        ├── python-tests.yml
+        └── ci.yml
+```
+
+---
+
+## Step-by-Step Build Plan (execute in this order)
+
+1. **Scaffold the repo** with the folder structure above, empty files with docstring stubs describing intended contents.
+2. **`payload_shield/crypto.py`**: Implement ECDH key generation/derivation using `cryptography.hazmat.primitives.asymmetric.x25519`, and AES-256-GCM encrypt/decrypt using `cryptography.hazmat.primitives.ciphers.aead.AESGCM`. Do not hand-roll any crypto primitives — use the `cryptography` library exclusively.
+3. **`payload_shield/session_store.py`**: Redis-backed store mapping session ID → derived key + expiry. Include `invalidate(session_id)` for logout.
+4. **`payload_shield/dependency.py` and `middleware.py`**: Wire encryption into FastAPI responses for opted-in routes; decrypt incoming encrypted request bodies where applicable.
+5. **`client-sdk/src/crypto.ts`**: Mirror the ECDH + AES-GCM logic using the browser's native WebCrypto API (`crypto.subtle`).
+6. **`client-sdk/src/PayloadShieldProvider.tsx` + `useEncryptedFetch.ts`**: Handshake on app load, expose decrypted-fetch hook, handle storage strategy per config.
+7. **Build `examples/fastapi-demo` and `examples/react-demo`** as a working end-to-end reference app (login → handshake → encrypted responses → decrypted UI → logout invalidates key).
+8. **Write tests** for crypto correctness, session expiry/invalidation, and route-level integration.
+9. **Write `README.md` and `docs/THREAT_MODEL.md`** stating exactly what this does and does not protect against — no overclaiming language anywhere in the docs.
+10. **Set up CI** (GitHub Actions) to run Python tests and lint on every push.
+11. **Package for distribution** — see the full "Distribution / Publishing" section below; treat it as part of this step, not an afterthought.
+
+---
+
+## Distribution / Publishing (two separate registries, two separate packages)
+
+This is one repo but TWO independently published packages. They are versioned and released separately — a backend v1.2.0 and a frontend v1.2.0 are not automatically compatible; maintain a compatibility table in the README.
+
+### Backend package → PyPI (installable via `pip install` or `uv add`)
+
+- Before anything else: check name availability on `pypi.org`. If `payload-shield` is taken, fall back to something like `fastapi-payload-shield`.
+- `pyproject.toml` must include: package name, version, description, dependencies (`cryptography`, `redis`, `fastapi`), Python version constraint, author/license metadata.
+- Build with: `python -m build` (produces `dist/*.whl` and `dist/*.tar.gz`).
+- Publish with: `twine upload dist/*` (requires a PyPI account + API token stored as a secret, never committed).
+- Once published, it's installable both ways, with no extra config needed for uv:
+  ```bash
+  pip install payload-shield
+  uv add payload-shield
+  ```
+- Recommend testing the full publish flow first on **TestPyPI** (`test.pypi.org`) before the real PyPI release.
+
+### Frontend package → npm (installable via `npm install` or `yarn add`)
+
+- Check name availability on `npmjs.com` first (e.g. `payload-shield-client`).
+- `package.json` must include: name, version, `main`/`module`/`types` fields pointing at compiled output (not raw `.ts` source).
+- TypeScript source must be **compiled to JS before publishing** — use `tsup` or `tsc` to build into a `dist/` folder. Consumers should never need to compile the SDK themselves.
+- Publish with: `npm login` then `npm publish` (or `npm publish --access public` if scoped, e.g. `@yourname/payload-shield-client`).
+- Add a `.npmignore` (or `files` field in `package.json`) so only `dist/`, `README.md`, and `package.json` ship — not source, tests, or config files.
+
+### CI automation (add once the library is stable, not required for v0)
+
+- `.github/workflows/publish-python.yml`: on git tag push (e.g. `v1.0.0`), build and `twine upload` automatically using a PyPI token stored in GitHub Secrets.
+- `.github/workflows/publish-npm.yml`: on git tag push, build and `npm publish` automatically using an npm token stored in GitHub Secrets.
+- Keep these separate from the existing `python-tests.yml`/`ci.yml` (which run on every push) — publish workflows should only trigger on tags, not every commit.
+
+---
+
+## Non-negotiable Constraints for the Agent
+
+- Use `cryptography` (Python) and native `WebCrypto` (browser) only — no custom/home-grown crypto.
+- Never embed a static/hardcoded key in the JS bundle.
+- Always tie key lifecycle to server-side session state so logout truly invalidates it.
+- Every public-facing doc (README, docstrings, package description) must include the threat-model caveat in plain language.
+- Default client storage mode should be `sessionStorage`, not `localStorage`.
